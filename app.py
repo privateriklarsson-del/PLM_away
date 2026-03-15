@@ -16,7 +16,10 @@ from database import (
     add_building_part_version,
     create_project, get_all_projects, get_project_parts,
     get_project_room_types, lock_project, toggle_project_part,
-    check_project_upgrades, upgrade_project_part
+    check_project_upgrades, upgrade_project_part,
+    update_project_phase, get_project_directives, respond_to_directive,
+    get_all_directives, get_directive_phase_rules, get_directive_project_responses,
+    PHASE_ORDER, PHASE_LABELS
 )
 
 st.set_page_config(
@@ -34,7 +37,7 @@ st.sidebar.title("🏗️ JM Masterdata")
 st.sidebar.markdown("*MVP — Byggdelar & Regler*")
 page = st.sidebar.radio(
     "Navigering",
-    ["Byggdelar", "Kontextfiltrering", "Projektkonfiguration", "Governance-logg", "Egenskapsdefinitioner", "Export (IDS/JSON)"]
+    ["Byggdelar", "Kontextfiltrering", "Projektkonfiguration", "Ändringsdirektiv", "Governance-logg", "Egenskapsdefinitioner", "Export (IDS/JSON)"]
 )
 
 
@@ -112,8 +115,17 @@ if page == "Byggdelar":
                 change_reason = st.text_area("Beslutsmotivering")
                 trigger = st.selectbox("Utlösande faktor", [
                     "regulatory", "cost", "quality_issue",
-                    "simplification", "supplier_change", "other"
-                ])
+                    "simplification", "supplier_change", "custom", "other"
+                ], format_func=lambda x: {
+                    "regulatory": "Myndighetskrav",
+                    "cost": "Kostnad",
+                    "quality_issue": "Kvalitetsavvikelse",
+                    "simplification": "Förenkling",
+                    "supplier_change": "Leverantörsbyte",
+                    "custom": "Fri orsak (ange nedan)",
+                    "other": "Övrigt",
+                }.get(x, x))
+                custom_trigger = st.text_input("Fri orsak (valfritt, t.ex. 'Inte köpt detta än')")
                 decided_by = st.text_input("Beslutare", value="Erik")
                 layer_desc = st.text_input("Uppbyggnad", value=sel["layer_description"])
 
@@ -135,7 +147,8 @@ if page == "Byggdelar":
                     add_building_part_version(
                         selected_id, new_version, change_type,
                         change_desc, change_reason, trigger,
-                        decided_by, layer_desc, new_props
+                        decided_by, layer_desc, new_props,
+                        custom_trigger_text=custom_trigger if custom_trigger else None
                     )
                     st.success(f"Version {new_version} skapad för {selected_id}")
                     st.rerun()
@@ -193,7 +206,7 @@ elif page == "Kontextfiltrering":
 # ============================================================
 elif page == "Projektkonfiguration":
     st.title("Projektkonfiguration")
-    st.markdown("*Skapa projektspecifik byggdelslista med versionslåsning*")
+    st.markdown("*Skapa projektspecifik byggdelslista med versionslåsning och fasstyrning*")
 
     tab1, tab2 = st.tabs(["Skapa nytt projekt", "Hantera projekt"])
 
@@ -203,6 +216,11 @@ elif page == "Projektkonfiguration":
             proj_id = st.text_input("Projekt-ID", placeholder="PRJ-2026-001")
             proj_name = st.text_input("Projektnamn", placeholder="Brf Solbacken")
             proj_country = st.selectbox("Land", ["SE", "NO", "FI", "DK"])
+            proj_phase = st.selectbox(
+                "Projektfas",
+                PHASE_ORDER,
+                format_func=lambda x: PHASE_LABELS.get(x, x)
+            )
             proj_desc = st.text_input("Beskrivning", placeholder="48 lgh, 6 vån")
 
             available_room_types = ["sovrum", "vardagsrum", "korridor", "våtrum",
@@ -213,8 +231,8 @@ elif page == "Projektkonfiguration":
             submitted = st.form_submit_button("Skapa projekt")
             if submitted and proj_id and proj_name:
                 try:
-                    create_project(proj_id, proj_name, proj_country, proj_rooms, proj_desc)
-                    st.success(f"Projekt **{proj_name}** skapat! Byggdelar matchade och låsta till aktuella versioner.")
+                    create_project(proj_id, proj_name, proj_country, proj_rooms, proj_phase, proj_desc)
+                    st.success(f"Projekt **{proj_name}** skapat i fas *{PHASE_LABELS[proj_phase]}*!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Fel: {e}")
@@ -234,6 +252,7 @@ elif page == "Projektkonfiguration":
 
             proj = next(p for p in projects if p["id"] == proj_choice)
             room_types = get_project_room_types(proj_choice)
+            is_locked = bool(proj["locked"])
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -242,33 +261,38 @@ elif page == "Projektkonfiguration":
             with col2:
                 st.markdown(f"**Land:** {proj['country']}")
                 st.markdown(f"**Skapad:** {proj['created_date']}")
-            with col3:
-                is_locked = bool(proj["locked"])
-                st.markdown(f"**Status:** {'🔒 Låst' if is_locked else '🔓 Öppen'}")
                 st.markdown(f"**Rumstyper:** {', '.join(room_types)}")
+            with col3:
+                st.markdown(f"**Status:** {'🔒 Låst' if is_locked else '🔓 Öppen'}")
+                current_phase = proj.get("phase", "design")
+                st.markdown(f"**Fas:** {PHASE_LABELS.get(current_phase, current_phase)}")
+
+                # Phase selector
+                if not is_locked:
+                    new_phase = st.selectbox(
+                        "Ändra fas",
+                        PHASE_ORDER,
+                        index=PHASE_ORDER.index(current_phase),
+                        format_func=lambda x: PHASE_LABELS.get(x, x),
+                        key="phase_select"
+                    )
+                    if new_phase != current_phase:
+                        if st.button("Uppdatera fas"):
+                            update_project_phase(proj_choice, new_phase)
+                            st.success(f"Fas ändrad till {PHASE_LABELS[new_phase]}")
+                            st.rerun()
+
+            # Directive summary
+            directives = get_project_directives(proj_choice)
+            pending = [d for d in directives if d["response"] == "pending"]
+            mandatory_pending = [d for d in pending if d["classification"] == "mandatory"]
+
+            if mandatory_pending:
+                st.error(f"🚨 {len(mandatory_pending)} obligatoriska ändringsdirektiv väntar på svar")
+            elif pending:
+                st.warning(f"📋 {len(pending)} valfria ändringsdirektiv väntar på svar")
 
             st.markdown("---")
-
-            # Check for available upgrades
-            upgrades = check_project_upgrades(proj_choice)
-            if upgrades:
-                st.warning(f"⚠️ {len(upgrades)} byggdelar har nyare versioner tillgängliga")
-                for u in upgrades:
-                    ucol1, ucol2 = st.columns([3, 1])
-                    with ucol1:
-                        st.markdown(
-                            f"**{u['building_part_id']}**: v{u['locked_version']} → v{u['latest_version']} "
-                            f"*({u.get('change_description', '')})*"
-                        )
-                    with ucol2:
-                        if not is_locked:
-                            if st.button(f"Uppgradera", key=f"upgrade_{u['building_part_id']}"):
-                                upgrade_project_part(proj_choice, u["building_part_id"])
-                                st.rerun()
-                        else:
-                            st.caption("Lås upp för att uppgradera")
-
-                st.markdown("---")
 
             # Building parts list
             st.subheader("Byggdelar i projektet")
@@ -293,24 +317,20 @@ elif page == "Projektkonfiguration":
                                 toggle_project_part(proj_choice, p["building_part_id"], new_state)
                                 st.rerun()
 
-                # Export project-specific list
+                # Export
                 st.markdown("---")
                 included_parts = [p for p in parts if p["included"]]
                 st.markdown(f"**{len(included_parts)} byggdelar inkluderade** av {len(parts)} matchade")
 
-                # Revit type list export
-                revit_list = [
-                    f"{p['building_part_id']}_v{p['version']}"
-                    for p in included_parts
-                ]
+                revit_list = [f"{p['building_part_id']}_v{p['version']}" for p in included_parts]
                 st.markdown("**Revit-typer att inkludera:**")
                 st.code("\n".join(revit_list))
 
-                # JSON export for project
                 proj_export = {
                     "project_id": proj["id"],
                     "project_name": proj["name"],
                     "country": proj["country"],
+                    "phase": proj.get("phase", "design"),
                     "room_types": room_types,
                     "locked": is_locked,
                     "building_parts": [
@@ -337,6 +357,168 @@ elif page == "Projektkonfiguration":
                     lock_project(proj_choice)
                     st.success("Projektet är nu låst. Versioner kan inte ändras.")
                     st.rerun()
+
+
+# ============================================================
+# PAGE: Ändringsdirektiv
+# ============================================================
+elif page == "Ändringsdirektiv":
+    st.title("Ändringsdirektiv")
+    st.markdown("*Spåra hur kravändringar sprids till projekt baserat på projektfas*")
+
+    tab1, tab2 = st.tabs(["Per projekt", "Översikt alla direktiv"])
+
+    with tab1:
+        projects = get_all_projects()
+        if not projects:
+            st.info("Inga projekt skapade.")
+        else:
+            proj_choice = st.selectbox(
+                "Välj projekt",
+                [p["id"] for p in projects],
+                format_func=lambda x: f"{x} — {next(p['name'] for p in projects if p['id'] == x)} ({PHASE_LABELS.get(next(p['phase'] for p in projects if p['id'] == x), '')})",
+                key="directive_proj"
+            )
+
+            proj = next(p for p in projects if p["id"] == proj_choice)
+            directives = get_project_directives(proj_choice)
+
+            if not directives:
+                st.success("Inga ändringsdirektiv för detta projekt.")
+            else:
+                # Group by status
+                pending = [d for d in directives if d["response"] == "pending"]
+                handled = [d for d in directives if d["response"] != "pending"]
+
+                if pending:
+                    st.subheader(f"Väntar på svar ({len(pending)})")
+                    for d in pending:
+                        class_icon = "🔴" if d["classification"] == "mandatory" else "🟡"
+                        class_label = "OBLIGATORISK" if d["classification"] == "mandatory" else "VALFRI"
+
+                        with st.container(border=True):
+                            dcol1, dcol2 = st.columns([3, 1])
+                            with dcol1:
+                                st.markdown(
+                                    f"{class_icon} **{class_label}** — {d['building_part_id']}: "
+                                    f"v{d.get('from_version', '?')} → v{d['to_version']}"
+                                )
+                                st.markdown(f"*{d['directive_description']}*")
+                                trigger_labels = {
+                                    "regulatory": "Myndighetskrav",
+                                    "cost": "Kostnad",
+                                    "quality_issue": "Kvalitetsavvikelse",
+                                    "simplification": "Förenkling",
+                                    "supplier_change": "Leverantörsbyte",
+                                    "custom": d.get("custom_trigger_text") or "Fri orsak",
+                                    "other": "Övrigt",
+                                }
+                                st.caption(f"Utfärdat: {d['issued_date']} | Orsak: {trigger_labels.get(d['trigger_category'], d['trigger_category'])}")
+                            with dcol2:
+                                note = st.text_input("Kommentar", key=f"note_{d['directive_id']}", placeholder="Valfri motivering")
+                                bcol1, bcol2, bcol3 = st.columns(3)
+                                with bcol1:
+                                    if st.button("✅ Acceptera", key=f"accept_{d['directive_id']}"):
+                                        respond_to_directive(proj_choice, d["directive_id"], "accepted", "Erik", note)
+                                        st.rerun()
+                                with bcol2:
+                                    if d["classification"] != "mandatory":
+                                        if st.button("❌ Avvisa", key=f"reject_{d['directive_id']}"):
+                                            respond_to_directive(proj_choice, d["directive_id"], "rejected", "Erik", note)
+                                            st.rerun()
+                                with bcol3:
+                                    if st.button("⏸️ Skjut upp", key=f"defer_{d['directive_id']}"):
+                                        respond_to_directive(proj_choice, d["directive_id"], "deferred", "Erik", note)
+                                        st.rerun()
+
+                if handled:
+                    st.markdown("---")
+                    st.subheader(f"Hanterade ({len(handled)})")
+                    handled_data = []
+                    for d in handled:
+                        response_labels = {
+                            "accepted": "✅ Accepterad",
+                            "rejected": "❌ Avvisad",
+                            "deferred": "⏸️ Uppskjuten",
+                        }
+                        handled_data.append({
+                            "Byggdel": d["building_part_id"],
+                            "Ändring": f"v{d.get('from_version', '?')} → v{d['to_version']}",
+                            "Klass": d["classification"],
+                            "Svar": response_labels.get(d["response"], d["response"]),
+                            "Datum": d.get("response_date", ""),
+                            "Av": d.get("responded_by", ""),
+                            "Kommentar": d.get("note", ""),
+                        })
+                    st.dataframe(pd.DataFrame(handled_data), use_container_width=True, hide_index=True)
+
+    with tab2:
+        all_directives = get_all_directives()
+        if not all_directives:
+            st.info("Inga ändringsdirektiv utfärdade.")
+        else:
+            for d in all_directives:
+                with st.container(border=True):
+                    dcol1, dcol2 = st.columns([3, 1])
+                    with dcol1:
+                        st.markdown(
+                            f"**{d['building_part_id']}**: v{d.get('from_version', '?')} → v{d['to_version']} "
+                            f"({d['default_classification']})"
+                        )
+                        st.markdown(f"*{d['description']}* — {d['issued_date']}")
+
+                        # Trigger label
+                        overview_trigger_labels = {
+                            "regulatory": "Myndighetskrav",
+                            "cost": "Kostnad",
+                            "quality_issue": "Kvalitetsavvikelse",
+                            "simplification": "Förenkling",
+                            "supplier_change": "Leverantörsbyte",
+                            "custom": d.get("custom_trigger_text") or "Fri orsak",
+                            "other": "Övrigt",
+                        }
+                        trigger_label = overview_trigger_labels.get(d.get("trigger_category", ""), d.get("trigger_category", ""))
+
+                        # Phase rules
+                        phase_rules = get_directive_phase_rules(d["id"])
+                        phase_chips = []
+                        for phase in PHASE_ORDER:
+                            cls = phase_rules.get(phase, "?")
+                            icon = {"mandatory": "🔴", "optional": "🟡", "not_applicable": "⚪"}.get(cls, "❓")
+                            phase_chips.append(f"{icon} {PHASE_LABELS.get(phase, phase)}")
+                        st.caption(f"Orsak: {trigger_label} | " + " | ".join(phase_chips))
+
+                    with dcol2:
+                        total = d.get("total_projects", 0)
+                        accepted = d.get("accepted", 0)
+                        pending_count = d.get("pending", 0)
+                        rejected = d.get("rejected", 0)
+                        deferred = d.get("deferred", 0)
+                        if total > 0:
+                            st.metric("Projekt", total)
+                            st.caption(f"✅ {accepted}  ⏳ {pending_count}  ❌ {rejected}  ⏸️ {deferred}")
+
+                    # Expandable detail
+                    with st.expander("Visa projektresponser"):
+                        responses = get_directive_project_responses(d["id"])
+                        if responses:
+                            resp_data = []
+                            for r in responses:
+                                response_labels = {
+                                    "pending": "⏳ Väntar",
+                                    "accepted": "✅ Accepterad",
+                                    "rejected": "❌ Avvisad",
+                                    "deferred": "⏸️ Uppskjuten",
+                                }
+                                resp_data.append({
+                                    "Projekt": f"{r['project_id']} ({r['project_name']})",
+                                    "Fas": PHASE_LABELS.get(r.get("project_phase", ""), ""),
+                                    "Klass": r["classification"],
+                                    "Svar": response_labels.get(r["response"], r["response"]),
+                                    "Datum": r.get("response_date", ""),
+                                    "Kommentar": r.get("note", ""),
+                                })
+                            st.dataframe(pd.DataFrame(resp_data), use_container_width=True, hide_index=True)
 
 
 # ============================================================
