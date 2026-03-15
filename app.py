@@ -21,6 +21,7 @@ from database import (
     get_all_directives, get_directive_phase_rules, get_directive_project_responses,
     PHASE_ORDER, PHASE_LABELS
 )
+from ids_generator import generate_ids_for_part, generate_all_ids, PROPERTY_MAP, SKIP_PROPERTIES
 
 st.set_page_config(
     page_title="JM Byggdelar Masterdata",
@@ -573,32 +574,108 @@ elif page == "Egenskapsdefinitioner":
 # PAGE: Export
 # ============================================================
 elif page == "Export (IDS/JSON)":
-    st.title("Export för IDS-pipeline")
-    st.markdown("*JSON-export av alla aktiva byggdelar med egenskaper — redo att konsumeras av IDS-generator*")
+    st.title("Export")
 
-    data = export_for_ids("IWS")
+    tab_ids, tab_json, tab_ctx = st.tabs(["IDS-filer", "JSON (masterdata)", "Kontextkrav"])
 
-    st.json(data)
+    # --- IDS Tab ---
+    with tab_ids:
+        st.markdown("*En IDS-fil per byggdel — ladda ner och kör i ifctester / Solibri*")
 
-    json_str = json.dumps(data, indent=2, ensure_ascii=False)
-    st.download_button(
-        label="📥 Ladda ner JSON",
-        data=json_str,
-        file_name="IWS_active_export.json",
-        mime="application/json"
-    )
+        all_ids = generate_all_ids("IWS")
 
-    st.markdown("---")
-    st.markdown("### Kontextkrav (export)")
-    contexts = get_all_contexts("IWS")
-    ctx_export = []
-    for ctx in contexts:
-        _, ctx_info, reqs = filter_by_context(ctx["id"])
-        ctx_export.append({
-            "context": ctx_info,
-            "requirements": reqs
-        })
-    st.json(ctx_export)
+        if not all_ids:
+            st.warning("Inga aktiva byggdelar att generera IDS för.")
+        else:
+            # Summary
+            st.markdown(f"**{len(all_ids)} IDS-filer** genererade")
+
+            # Property mapping info
+            with st.expander("Egenskapsmappning (masterdata → IFC)"):
+                st.markdown("Dessa masterdata-egenskaper mappas till IFC-properties i IDS:")
+                map_data = []
+                for prop_id, mapping in sorted(PROPERTY_MAP.items()):
+                    map_data.append({
+                        "Masterdata-egenskap": prop_id,
+                        "IFC PropertySet": mapping["propertySet"],
+                        "IFC Property": mapping["baseName"],
+                        "Datatyp": mapping["dataType"],
+                    })
+                st.dataframe(pd.DataFrame(map_data), use_container_width=True, hide_index=True)
+                st.caption(f"Egenskaper som hoppas över (geometri-check): {', '.join(SKIP_PROPERTIES)}")
+                st.markdown("*Redigera `PROPERTY_MAP` i `ids_generator.py` för att anpassa till er Revit-export.*")
+
+            st.markdown("---")
+
+            # Download all as zip
+            import io
+            import zipfile
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for part_id, data in all_ids.items():
+                    filename = f"{part_id}_v{data['version']}.ids"
+                    zf.writestr(filename, data["xml"])
+            zip_buffer.seek(0)
+
+            st.download_button(
+                label=f"📦 Ladda ner alla IDS-filer ({len(all_ids)} st) som ZIP",
+                data=zip_buffer.getvalue(),
+                file_name="JM_IWS_IDS_all.zip",
+                mime="application/zip",
+                type="primary"
+            )
+
+            st.markdown("---")
+
+            # Per-file view and download
+            st.subheader("Per byggdel")
+            for part_id, data in sorted(all_ids.items()):
+                with st.container(border=True):
+                    icol1, icol2, icol3 = st.columns([2, 2, 1])
+                    with icol1:
+                        st.markdown(f"**{part_id}** — {data['name']}")
+                    with icol2:
+                        st.caption(f"v{data['version']} | {data['property_count']} egenskapskontroller + referenscheck")
+                    with icol3:
+                        st.download_button(
+                            label="📥 .ids",
+                            data=data["xml"],
+                            file_name=f"{part_id}_v{data['version']}.ids",
+                            mime="application/xml",
+                            key=f"ids_dl_{part_id}"
+                        )
+
+                    with st.expander("Visa XML"):
+                        st.code(data["xml"], language="xml")
+
+    # --- JSON Tab ---
+    with tab_json:
+        st.markdown("*JSON-export av alla aktiva byggdelar med egenskaper*")
+
+        data = export_for_ids("IWS")
+
+        json_str = json.dumps(data, indent=2, ensure_ascii=False)
+        st.download_button(
+            label="📥 Ladda ner JSON",
+            data=json_str,
+            file_name="IWS_active_export.json",
+            mime="application/json"
+        )
+
+        st.json(data)
+
+    # --- Context Tab ---
+    with tab_ctx:
+        st.markdown("*Kontextkrav (export)*")
+        contexts = get_all_contexts("IWS")
+        ctx_export = []
+        for ctx in contexts:
+            _, ctx_info, reqs = filter_by_context(ctx["id"])
+            ctx_export.append({
+                "context": ctx_info,
+                "requirements": reqs
+            })
+        st.json(ctx_export)
 
 
 # --- Footer ---
