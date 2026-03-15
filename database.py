@@ -71,8 +71,9 @@ def init_db():
             change_reason TEXT NOT NULL,
             trigger_category TEXT CHECK(trigger_category IN (
                 'regulatory', 'cost', 'quality_issue', 'simplification',
-                'supplier_change', 'other'
+                'supplier_change', 'custom', 'other'
             )),
+            custom_trigger_text TEXT,  -- freetext when trigger_category = 'custom'
             decided_by TEXT NOT NULL,
             decided_date DATE NOT NULL,
             -- Technical description
@@ -140,6 +141,9 @@ def init_db():
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             country TEXT NOT NULL CHECK(country IN ('SE', 'NO', 'FI', 'DK')),
+            phase TEXT NOT NULL DEFAULT 'design' CHECK(phase IN (
+                'design', 'construction_docs', 'production', 'construction', 'completed'
+            )),
             created_date DATE NOT NULL,
             locked INTEGER NOT NULL DEFAULT 0,
             description TEXT
@@ -163,6 +167,55 @@ def init_db():
             project_id TEXT NOT NULL REFERENCES project_configuration(id),
             room_type TEXT NOT NULL,
             UNIQUE(project_id, room_type)
+        )
+    """)
+
+    # --- Change Directives ---
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS change_directive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            building_part_id TEXT NOT NULL REFERENCES building_part(id),
+            from_version_id INTEGER REFERENCES building_part_version(id),
+            to_version_id INTEGER NOT NULL REFERENCES building_part_version(id),
+            trigger_category TEXT NOT NULL,
+            custom_trigger_text TEXT,
+            issued_date DATE NOT NULL,
+            description TEXT NOT NULL,
+            default_classification TEXT NOT NULL DEFAULT 'optional'
+                CHECK(default_classification IN ('mandatory', 'optional'))
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS directive_phase_rule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            directive_id INTEGER NOT NULL REFERENCES change_directive(id),
+            phase TEXT NOT NULL CHECK(phase IN (
+                'design', 'construction_docs', 'production', 'construction', 'completed'
+            )),
+            classification TEXT NOT NULL CHECK(classification IN (
+                'mandatory', 'optional', 'not_applicable'
+            )),
+            UNIQUE(directive_id, phase)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS project_directive_response (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES project_configuration(id),
+            directive_id INTEGER NOT NULL REFERENCES change_directive(id),
+            classification TEXT NOT NULL CHECK(classification IN (
+                'mandatory', 'optional', 'not_applicable'
+            )),
+            response TEXT CHECK(response IN (
+                'pending', 'accepted', 'rejected', 'deferred'
+            )) DEFAULT 'pending',
+            response_date DATE,
+            responded_by TEXT,
+            note TEXT,
+            UNIQUE(project_id, directive_id)
         )
     """)
 
@@ -349,12 +402,12 @@ def seed_data():
             """INSERT INTO building_part_version
                (building_part_id, version, valid_from, change_type,
                 change_description, change_reason, trigger_category,
-                decided_by, decided_date, layer_description)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                custom_trigger_text, decided_by, decided_date, layer_description)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (w["id"], "1.0", today, "new",
              "Initial import från D-0004649",
              "Uppbyggnad av masterdata MVP",
-             "other", "Erik", today, w["layers"])
+             "other", None, "Erik", today, w["layers"])
         )
         version_id = c.lastrowid
         # Properties
@@ -612,11 +665,19 @@ def export_for_ids(system_family_id):
 def add_building_part_version(building_part_id, version, change_type,
                                change_description, change_reason,
                                trigger_category, decided_by, layer_description,
-                               properties):
-    """Add a new version to an existing building part."""
+                               properties, phase_rules=None, custom_trigger_text=None):
+    """Add a new version and auto-generate change directives to affected projects."""
     conn = get_connection()
     c = conn.cursor()
     today = date.today().isoformat()
+
+    # Get the old version id before closing it
+    old_version = c.execute(
+        """SELECT id FROM building_part_version
+           WHERE building_part_id = ? AND valid_to IS NULL""",
+        (building_part_id,)
+    ).fetchone()
+    old_version_id = old_version["id"] if old_version else None
 
     # Close previous version
     c.execute(
@@ -629,38 +690,269 @@ def add_building_part_version(building_part_id, version, change_type,
         """INSERT INTO building_part_version
            (building_part_id, version, valid_from, change_type,
             change_description, change_reason, trigger_category,
-            decided_by, decided_date, layer_description)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            custom_trigger_text, decided_by, decided_date, layer_description)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (building_part_id, version, today, change_type,
          change_description, change_reason, trigger_category,
-         decided_by, today, layer_description)
+         custom_trigger_text, decided_by, today, layer_description)
     )
-    version_id = c.lastrowid
+    new_version_id = c.lastrowid
 
     for prop_id, val in properties.items():
         c.execute(
             "INSERT INTO version_property (version_id, property_id, value) VALUES (?,?,?)",
-            (version_id, prop_id, val)
+            (new_version_id, prop_id, val)
+        )
+
+    # --- Auto-generate change directive ---
+    # Default classification based on trigger category
+    default_class = "mandatory" if trigger_category == "regulatory" else "optional"
+
+    c.execute(
+        """INSERT INTO change_directive
+           (building_part_id, from_version_id, to_version_id,
+            trigger_category, custom_trigger_text, issued_date,
+            description, default_classification)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (building_part_id, old_version_id, new_version_id,
+         trigger_category, custom_trigger_text, today,
+         change_description, default_class)
+    )
+    directive_id = c.lastrowid
+
+    # Phase-based classification rules
+    # If not provided, use defaults based on trigger category
+    if phase_rules is None:
+        if trigger_category == "regulatory":
+            phase_rules = {
+                "design": "mandatory",
+                "construction_docs": "mandatory",
+                "production": "mandatory",
+                "construction": "optional",
+                "completed": "not_applicable",
+            }
+        elif trigger_category == "quality_issue":
+            phase_rules = {
+                "design": "mandatory",
+                "construction_docs": "mandatory",
+                "production": "optional",
+                "construction": "optional",
+                "completed": "not_applicable",
+            }
+        else:  # cost, simplification, supplier_change, custom, other
+            phase_rules = {
+                "design": "optional",
+                "construction_docs": "optional",
+                "production": "not_applicable",
+                "construction": "not_applicable",
+                "completed": "not_applicable",
+            }
+
+    for phase, classification in phase_rules.items():
+        c.execute(
+            """INSERT INTO directive_phase_rule
+               (directive_id, phase, classification) VALUES (?,?,?)""",
+            (directive_id, phase, classification)
+        )
+
+    # --- Distribute to affected projects ---
+    affected_projects = c.execute(
+        """SELECT pc.id as project_id, pc.phase
+           FROM project_building_part pbp
+           JOIN project_configuration pc ON pbp.project_id = pc.id
+           WHERE pbp.building_part_id = ? AND pbp.included = 1
+           AND pbp.locked_version_id = ?""",
+        (building_part_id, old_version_id)
+    ).fetchall()
+
+    for proj in affected_projects:
+        # Resolve classification for this project's phase
+        resolved = phase_rules.get(proj["phase"], "not_applicable")
+
+        c.execute(
+            """INSERT OR IGNORE INTO project_directive_response
+               (project_id, directive_id, classification, response)
+               VALUES (?,?,?,?)""",
+            (proj["project_id"], directive_id, resolved,
+             "pending" if resolved != "not_applicable" else "accepted")
         )
 
     conn.commit()
     conn.close()
-    return version_id
+    return new_version_id
+
+
+# ============================================================
+# Change Directives
+# ============================================================
+
+PHASE_ORDER = ["design", "construction_docs", "production", "construction", "completed"]
+PHASE_LABELS = {
+    "design": "Projektering",
+    "construction_docs": "Bygghandling",
+    "production": "Produktion",
+    "construction": "Byggnation",
+    "completed": "Avslutat",
+}
+
+
+def update_project_phase(project_id, new_phase):
+    """Update project phase. Re-evaluate pending directives for new classification."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        "UPDATE project_configuration SET phase = ? WHERE id = ?",
+        (new_phase, project_id)
+    )
+
+    # Re-evaluate all pending directives for this project
+    pending = c.execute(
+        """SELECT pdr.id, pdr.directive_id
+           FROM project_directive_response pdr
+           WHERE pdr.project_id = ? AND pdr.response = 'pending'""",
+        (project_id,)
+    ).fetchall()
+
+    for p in pending:
+        new_class = c.execute(
+            """SELECT classification FROM directive_phase_rule
+               WHERE directive_id = ? AND phase = ?""",
+            (p["directive_id"], new_phase)
+        ).fetchone()
+        if new_class:
+            c.execute(
+                "UPDATE project_directive_response SET classification = ? WHERE id = ?",
+                (new_class["classification"], p["id"])
+            )
+            # Auto-accept not_applicable
+            if new_class["classification"] == "not_applicable":
+                c.execute(
+                    """UPDATE project_directive_response
+                       SET response = 'accepted', response_date = ?, note = 'Auto: ej tillämpligt i denna fas'
+                       WHERE id = ?""",
+                    (date.today().isoformat(), p["id"])
+                )
+
+    conn.commit()
+    conn.close()
+
+
+def get_project_directives(project_id):
+    """Get all directives for a project with their status."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT pdr.*, cd.building_part_id, cd.description as directive_description,
+                  cd.trigger_category, cd.custom_trigger_text, cd.issued_date,
+                  bpv_from.version as from_version,
+                  bpv_to.version as to_version,
+                  bpv_to.layer_description as new_layer_description
+           FROM project_directive_response pdr
+           JOIN change_directive cd ON pdr.directive_id = cd.id
+           LEFT JOIN building_part_version bpv_from ON cd.from_version_id = bpv_from.id
+           JOIN building_part_version bpv_to ON cd.to_version_id = bpv_to.id
+           WHERE pdr.project_id = ?
+           ORDER BY pdr.response, cd.issued_date DESC""",
+        (project_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def respond_to_directive(project_id, directive_id, response, responded_by, note=""):
+    """Record project's response to a change directive."""
+    conn = get_connection()
+    today = date.today().isoformat()
+
+    # Get the directive info for potential auto-upgrade
+    directive = conn.execute(
+        """SELECT cd.to_version_id, cd.building_part_id
+           FROM change_directive cd
+           WHERE cd.id = ?""",
+        (directive_id,)
+    ).fetchone()
+
+    conn.execute(
+        """UPDATE project_directive_response
+           SET response = ?, response_date = ?, responded_by = ?, note = ?
+           WHERE project_id = ? AND directive_id = ?""",
+        (response, today, responded_by, note, project_id, directive_id)
+    )
+
+    # If accepted, auto-upgrade the building part version
+    if response == "accepted" and directive:
+        conn.execute(
+            """UPDATE project_building_part SET locked_version_id = ?
+               WHERE project_id = ? AND building_part_id = ?""",
+            (directive["to_version_id"], project_id, directive["building_part_id"])
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_all_directives():
+    """Get all change directives with response summary."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT cd.*,
+                  bpv_from.version as from_version,
+                  bpv_to.version as to_version,
+                  COUNT(pdr.id) as total_projects,
+                  SUM(CASE WHEN pdr.response = 'accepted' THEN 1 ELSE 0 END) as accepted,
+                  SUM(CASE WHEN pdr.response = 'rejected' THEN 1 ELSE 0 END) as rejected,
+                  SUM(CASE WHEN pdr.response = 'deferred' THEN 1 ELSE 0 END) as deferred,
+                  SUM(CASE WHEN pdr.response = 'pending' THEN 1 ELSE 0 END) as pending
+           FROM change_directive cd
+           LEFT JOIN building_part_version bpv_from ON cd.from_version_id = bpv_from.id
+           JOIN building_part_version bpv_to ON cd.to_version_id = bpv_to.id
+           LEFT JOIN project_directive_response pdr ON cd.id = pdr.directive_id
+           GROUP BY cd.id
+           ORDER BY cd.issued_date DESC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_directive_phase_rules(directive_id):
+    """Get phase classification rules for a directive."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM directive_phase_rule WHERE directive_id = ?",
+        (directive_id,)
+    ).fetchall()
+    conn.close()
+    return {r["phase"]: r["classification"] for r in rows}
+
+
+def get_directive_project_responses(directive_id):
+    """Get all project responses for a specific directive."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT pdr.*, pc.name as project_name, pc.phase as project_phase
+           FROM project_directive_response pdr
+           JOIN project_configuration pc ON pdr.project_id = pc.id
+           WHERE pdr.directive_id = ?
+           ORDER BY pdr.classification DESC, pdr.response""",
+        (directive_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ============================================================
 # Project Configuration
 # ============================================================
 
-def create_project(project_id, name, country, room_types, description=""):
+def create_project(project_id, name, country, room_types, phase="design", description=""):
     """Create a new project configuration and auto-populate with matching building parts."""
     conn = get_connection()
     c = conn.cursor()
     today = date.today().isoformat()
 
     c.execute(
-        "INSERT INTO project_configuration VALUES (?,?,?,?,?,?)",
-        (project_id, name, country, today, 0, description)
+        "INSERT INTO project_configuration VALUES (?,?,?,?,?,?,?)",
+        (project_id, name, country, phase, today, 0, description)
     )
 
     # Store room types
