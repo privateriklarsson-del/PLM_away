@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ids xmlns="http://standards.buildingsmart.org/IDS"
+     xmlns:xs="http://www.w3.org/2001/XMLSchema"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd">
+  <info>
+    <title>IWS-03 — Standard mellanvägg 70mm</title>
+    <description>IDS validation for IWS-03 v1.0. Generated from JM Masterdata. Layer: 12.5mm gipsskiva lätt | 70mm stålregel | 12.5mm gipsskiva lätt</description>
+    <version>1.0</version>
+    <author>JM Masterdata MVP</author>
+  </info>
+  <specifications>
+    <specification name="IWS-03 property validation" ifcVersion="IFC4">
+      <applicability minOccurs="0" maxOccurs="unbounded">
+        <entity>
+          <name>
+            <simpleValue>IFCWALL</simpleValue>
+          </name>
+        </entity>
+        <attribute>
+          <name>
+            <simpleValue>Name</simpleValue>
+          </name>
+          <value>
+            <simpleValue>IWS-03</simpleValue>
+          </value>
+        </attribute>
+      </applicability>
+      <requirements>
+        <property dataType="IfcInteger" instructions="gypsum_layers_per_side — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>JM_TechnicalProperties</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>GypsumLayersPerSide</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>1</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcBoolean" instructions="insulated — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>JM_TechnicalProperties</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>IsInsulated</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>FALSE</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcBoolean" instructions="load_bearing — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>Pset_WallCommon</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>LoadBearing</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>FALSE</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcLengthMeasure" instructions="max_height_max — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>JM_TechnicalProperties</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>MaxHeightMax</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>4400</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcLengthMeasure" instructions="max_height_min — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>JM_TechnicalProperties</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>MaxHeightMin</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>3550</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcLabel" instructions="sound_reduction — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>Pset_WallCommon</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>AcousticRating</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>35 dB</simpleValue>
+          </value>
+        </property>
+        <property dataType="IfcLengthMeasure" instructions="stud_width — JM Masterdata v1.0">
+          <propertySet>
+            <simpleValue>JM_TechnicalProperties</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>StudWidth</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>70</simpleValue>
+          </value>
+        </property>
+      </requirements>
+    </specification>
+    <specification name="IWS-03 reference check" ifcVersion="IFC4">
+      <applicability minOccurs="0" maxOccurs="unbounded">
+        <entity>
+          <name>
+            <simpleValue>IFCWALL</simpleValue>
+          </name>
+        </entity>
+        <attribute>
+          <name>
+            <simpleValue>Name</simpleValue>
+          </name>
+          <value>
+            <simpleValue>IWS-03</simpleValue>
+          </value>
+        </attribute>
+      </applicability>
+      <requirements>
+        <property dataType="IfcLabel" instructions="Wall type reference must match masterdata ID">
+          <propertySet>
+            <simpleValue>Pset_WallCommon</simpleValue>
+          </propertySet>
+          <baseName>
+            <simpleValue>Reference</simpleValue>
+          </baseName>
+          <value>
+            <simpleValue>IWS-03</simpleValue>
+          </value>
+        </property>
+      </requirements>
+    </specification>
+  </specifications>
+</ids>
