@@ -135,6 +135,37 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS project_configuration (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            country TEXT NOT NULL CHECK(country IN ('SE', 'NO', 'FI', 'DK')),
+            created_date DATE NOT NULL,
+            locked INTEGER NOT NULL DEFAULT 0,
+            description TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS project_building_part (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES project_configuration(id),
+            building_part_id TEXT NOT NULL REFERENCES building_part(id),
+            locked_version_id INTEGER NOT NULL REFERENCES building_part_version(id),
+            included INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(project_id, building_part_id)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS project_room_type (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES project_configuration(id),
+            room_type TEXT NOT NULL,
+            UNIQUE(project_id, room_type)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -615,3 +646,215 @@ def add_building_part_version(building_part_id, version, change_type,
     conn.commit()
     conn.close()
     return version_id
+
+
+# ============================================================
+# Project Configuration
+# ============================================================
+
+def create_project(project_id, name, country, room_types, description=""):
+    """Create a new project configuration and auto-populate with matching building parts."""
+    conn = get_connection()
+    c = conn.cursor()
+    today = date.today().isoformat()
+
+    c.execute(
+        "INSERT INTO project_configuration VALUES (?,?,?,?,?,?)",
+        (project_id, name, country, today, 0, description)
+    )
+
+    # Store room types
+    for rt in room_types:
+        c.execute(
+            "INSERT INTO project_room_type (project_id, room_type) VALUES (?,?)",
+            (project_id, rt)
+        )
+
+    # Find all matching building parts via context requirements
+    # Get all contexts matching this country + room types
+    matched_version_ids = set()
+    for rt in room_types:
+        contexts = c.execute(
+            """SELECT id FROM context_requirement
+               WHERE (country = ? OR country IS NULL)
+               AND (room_type = ? OR room_type IS NULL)""",
+            (country, rt)
+        ).fetchall()
+
+        for ctx in contexts:
+            # Use the filter logic to find matching parts
+            reqs = c.execute(
+                """SELECT crp.property_id, crp.required_value,
+                          pd.data_type, pd.comparison_operator, pd.hierarchy_order
+                   FROM context_requirement_property crp
+                   JOIN property_definition pd ON crp.property_id = pd.id
+                   WHERE crp.context_id = ?""",
+                (ctx["id"],)
+            ).fetchall()
+
+            ctx_info = c.execute(
+                "SELECT * FROM context_requirement WHERE id = ?", (ctx["id"],)
+            ).fetchone()
+
+            versions = c.execute(
+                """SELECT bpv.id as version_id, bp.id as part_id
+                   FROM building_part_version bpv
+                   JOIN building_part bp ON bpv.building_part_id = bp.id
+                   WHERE bp.system_family_id = ?
+                   AND bp.status = 'active'
+                   AND bpv.valid_to IS NULL""",
+                (ctx_info["system_family_id"],)
+            ).fetchall()
+
+            for v in versions:
+                props = c.execute(
+                    "SELECT property_id, value FROM version_property WHERE version_id = ?",
+                    (v["version_id"],)
+                ).fetchall()
+                prop_map = {p["property_id"]: p["value"] for p in props}
+
+                passes = True
+                for req in reqs:
+                    prop_val = prop_map.get(req["property_id"])
+                    if prop_val is None:
+                        passes = False
+                        break
+                    if req["comparison_operator"] == ">=":
+                        if float(prop_val) < float(req["required_value"]):
+                            passes = False; break
+                    elif req["comparison_operator"] == "<=":
+                        if float(prop_val) > float(req["required_value"]):
+                            passes = False; break
+                    elif req["comparison_operator"] == "exact":
+                        if prop_val.lower() != req["required_value"].lower():
+                            passes = False; break
+                    elif req["comparison_operator"] == "hierarchy":
+                        hierarchy = json.loads(req["hierarchy_order"]) if req["hierarchy_order"] else []
+                        if hierarchy:
+                            req_idx = hierarchy.index(req["required_value"]) if req["required_value"] in hierarchy else -1
+                            val_idx = hierarchy.index(prop_val) if prop_val in hierarchy else -1
+                            if val_idx < req_idx:
+                                passes = False; break
+
+                if passes:
+                    matched_version_ids.add((v["part_id"], v["version_id"]))
+
+    # If no context requirements matched, include ALL active versions as fallback
+    if not matched_version_ids:
+        all_active = c.execute(
+            """SELECT bp.id as part_id, bpv.id as version_id
+               FROM building_part bp
+               JOIN building_part_version bpv ON bp.id = bpv.building_part_id
+               WHERE bp.status = 'active' AND bpv.valid_to IS NULL"""
+        ).fetchall()
+        matched_version_ids = {(r["part_id"], r["version_id"]) for r in all_active}
+
+    # Insert matched parts, locked to current versions
+    for part_id, version_id in matched_version_ids:
+        c.execute(
+            """INSERT OR IGNORE INTO project_building_part
+               (project_id, building_part_id, locked_version_id, included)
+               VALUES (?,?,?,1)""",
+            (project_id, part_id, version_id)
+        )
+
+    conn.commit()
+    conn.close()
+    return project_id
+
+
+def get_all_projects():
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM project_configuration ORDER BY created_date DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_project_parts(project_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT pbp.*, bp.name as part_name, bp.status,
+                  bpv.version, bpv.valid_from, bpv.layer_description,
+                  bpv.valid_to
+           FROM project_building_part pbp
+           JOIN building_part bp ON pbp.building_part_id = bp.id
+           JOIN building_part_version bpv ON pbp.locked_version_id = bpv.id
+           WHERE pbp.project_id = ?
+           ORDER BY pbp.building_part_id""",
+        (project_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_project_room_types(project_id):
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT room_type FROM project_room_type WHERE project_id = ?",
+        (project_id,)
+    ).fetchall()
+    conn.close()
+    return [r["room_type"] for r in rows]
+
+
+def lock_project(project_id):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE project_configuration SET locked = 1 WHERE id = ?",
+        (project_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def toggle_project_part(project_id, building_part_id, included):
+    conn = get_connection()
+    conn.execute(
+        """UPDATE project_building_part SET included = ?
+           WHERE project_id = ? AND building_part_id = ?""",
+        (included, project_id, building_part_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def check_project_upgrades(project_id):
+    """Check if any locked versions have been superseded by newer versions."""
+    conn = get_connection()
+    parts = conn.execute(
+        """SELECT pbp.building_part_id, pbp.locked_version_id,
+                  bpv_locked.version as locked_version,
+                  bpv_latest.id as latest_version_id,
+                  bpv_latest.version as latest_version,
+                  bpv_latest.change_description
+           FROM project_building_part pbp
+           JOIN building_part_version bpv_locked ON pbp.locked_version_id = bpv_locked.id
+           LEFT JOIN building_part_version bpv_latest
+             ON bpv_latest.building_part_id = pbp.building_part_id
+             AND bpv_latest.valid_to IS NULL
+           WHERE pbp.project_id = ? AND pbp.included = 1
+           AND bpv_latest.id != pbp.locked_version_id""",
+        (project_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in parts]
+
+
+def upgrade_project_part(project_id, building_part_id):
+    """Upgrade a project's building part to the latest active version."""
+    conn = get_connection()
+    latest = conn.execute(
+        """SELECT bpv.id FROM building_part_version bpv
+           WHERE bpv.building_part_id = ? AND bpv.valid_to IS NULL""",
+        (building_part_id,)
+    ).fetchone()
+    if latest:
+        conn.execute(
+            """UPDATE project_building_part SET locked_version_id = ?
+               WHERE project_id = ? AND building_part_id = ?""",
+            (latest["id"], project_id, building_part_id)
+        )
+    conn.commit()
+    conn.close()
