@@ -13,7 +13,10 @@ from database import (
     get_all_building_parts, get_version_properties,
     filter_by_context, get_all_contexts,
     get_all_property_definitions, export_for_ids,
-    add_building_part_version
+    add_building_part_version,
+    create_project, get_all_projects, get_project_parts,
+    get_project_room_types, lock_project, toggle_project_part,
+    check_project_upgrades, upgrade_project_part
 )
 
 st.set_page_config(
@@ -31,7 +34,7 @@ st.sidebar.title("🏗️ JM Masterdata")
 st.sidebar.markdown("*MVP — Byggdelar & Regler*")
 page = st.sidebar.radio(
     "Navigering",
-    ["Byggdelar", "Kontextfiltrering", "Governance-logg", "Egenskapsdefinitioner", "Export (IDS/JSON)"]
+    ["Byggdelar", "Kontextfiltrering", "Projektkonfiguration", "Governance-logg", "Egenskapsdefinitioner", "Export (IDS/JSON)"]
 )
 
 
@@ -183,6 +186,157 @@ elif page == "Kontextfiltrering":
                 st.markdown(f"- **{m['part_id']}** ({m['name']}) — v{m['version']} — `{m['layer_description']}`")
         else:
             st.error("Inga byggdelar uppfyller kontextens krav.")
+
+
+# ============================================================
+# PAGE: Projektkonfiguration
+# ============================================================
+elif page == "Projektkonfiguration":
+    st.title("Projektkonfiguration")
+    st.markdown("*Skapa projektspecifik byggdelslista med versionslåsning*")
+
+    tab1, tab2 = st.tabs(["Skapa nytt projekt", "Hantera projekt"])
+
+    with tab1:
+        with st.form("new_project"):
+            st.subheader("Nytt projekt")
+            proj_id = st.text_input("Projekt-ID", placeholder="PRJ-2026-001")
+            proj_name = st.text_input("Projektnamn", placeholder="Brf Solbacken")
+            proj_country = st.selectbox("Land", ["SE", "NO", "FI", "DK"])
+            proj_desc = st.text_input("Beskrivning", placeholder="48 lgh, 6 vån")
+
+            available_room_types = ["sovrum", "vardagsrum", "korridor", "våtrum",
+                                     "schakt", "förråd", "trapphus", "kök"]
+            proj_rooms = st.multiselect("Rumstyper i projektet", available_room_types,
+                                         default=["sovrum", "korridor", "våtrum"])
+
+            submitted = st.form_submit_button("Skapa projekt")
+            if submitted and proj_id and proj_name:
+                try:
+                    create_project(proj_id, proj_name, proj_country, proj_rooms, proj_desc)
+                    st.success(f"Projekt **{proj_name}** skapat! Byggdelar matchade och låsta till aktuella versioner.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fel: {e}")
+            elif submitted:
+                st.error("Fyll i projekt-ID och namn.")
+
+    with tab2:
+        projects = get_all_projects()
+        if not projects:
+            st.info("Inga projekt skapade ännu.")
+        else:
+            proj_choice = st.selectbox(
+                "Välj projekt",
+                [p["id"] for p in projects],
+                format_func=lambda x: f"{x} — {next(p['name'] for p in projects if p['id'] == x)}"
+            )
+
+            proj = next(p for p in projects if p["id"] == proj_choice)
+            room_types = get_project_room_types(proj_choice)
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"**{proj['name']}**")
+                st.markdown(f"*{proj.get('description', '')}*")
+            with col2:
+                st.markdown(f"**Land:** {proj['country']}")
+                st.markdown(f"**Skapad:** {proj['created_date']}")
+            with col3:
+                is_locked = bool(proj["locked"])
+                st.markdown(f"**Status:** {'🔒 Låst' if is_locked else '🔓 Öppen'}")
+                st.markdown(f"**Rumstyper:** {', '.join(room_types)}")
+
+            st.markdown("---")
+
+            # Check for available upgrades
+            upgrades = check_project_upgrades(proj_choice)
+            if upgrades:
+                st.warning(f"⚠️ {len(upgrades)} byggdelar har nyare versioner tillgängliga")
+                for u in upgrades:
+                    ucol1, ucol2 = st.columns([3, 1])
+                    with ucol1:
+                        st.markdown(
+                            f"**{u['building_part_id']}**: v{u['locked_version']} → v{u['latest_version']} "
+                            f"*({u.get('change_description', '')})*"
+                        )
+                    with ucol2:
+                        if not is_locked:
+                            if st.button(f"Uppgradera", key=f"upgrade_{u['building_part_id']}"):
+                                upgrade_project_part(proj_choice, u["building_part_id"])
+                                st.rerun()
+                        else:
+                            st.caption("Lås upp för att uppgradera")
+
+                st.markdown("---")
+
+            # Building parts list
+            st.subheader("Byggdelar i projektet")
+            parts = get_project_parts(proj_choice)
+
+            if parts:
+                for p in parts:
+                    pcol1, pcol2, pcol3 = st.columns([3, 2, 1])
+                    with pcol1:
+                        status_icon = "✅" if p["included"] else "⬜"
+                        version_warning = ""
+                        if p.get("valid_to"):
+                            version_warning = " ⚠️ *gammal version*"
+                        st.markdown(f"{status_icon} **{p['building_part_id']}** — {p['part_name']}{version_warning}")
+                    with pcol2:
+                        st.markdown(f"v{p['version']} | `{p['layer_description']}`")
+                    with pcol3:
+                        if not is_locked:
+                            new_state = 0 if p["included"] else 1
+                            label = "Exkludera" if p["included"] else "Inkludera"
+                            if st.button(label, key=f"toggle_{p['building_part_id']}"):
+                                toggle_project_part(proj_choice, p["building_part_id"], new_state)
+                                st.rerun()
+
+                # Export project-specific list
+                st.markdown("---")
+                included_parts = [p for p in parts if p["included"]]
+                st.markdown(f"**{len(included_parts)} byggdelar inkluderade** av {len(parts)} matchade")
+
+                # Revit type list export
+                revit_list = [
+                    f"{p['building_part_id']}_v{p['version']}"
+                    for p in included_parts
+                ]
+                st.markdown("**Revit-typer att inkludera:**")
+                st.code("\n".join(revit_list))
+
+                # JSON export for project
+                proj_export = {
+                    "project_id": proj["id"],
+                    "project_name": proj["name"],
+                    "country": proj["country"],
+                    "room_types": room_types,
+                    "locked": is_locked,
+                    "building_parts": [
+                        {
+                            "id": p["building_part_id"],
+                            "name": p["part_name"],
+                            "version": p["version"],
+                            "layer_description": p["layer_description"],
+                        }
+                        for p in included_parts
+                    ]
+                }
+                st.download_button(
+                    "📥 Ladda ner projektkonfiguration (JSON)",
+                    json.dumps(proj_export, indent=2, ensure_ascii=False),
+                    file_name=f"{proj['id']}_config.json",
+                    mime="application/json"
+                )
+
+            # Lock button
+            if not is_locked:
+                st.markdown("---")
+                if st.button("🔒 Lås projektkonfiguration", type="primary"):
+                    lock_project(proj_choice)
+                    st.success("Projektet är nu låst. Versioner kan inte ändras.")
+                    st.rerun()
 
 
 # ============================================================
